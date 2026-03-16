@@ -1,4 +1,4 @@
-# Security Policy for LukMiner
+# Security Policy for phi-triple-miner
 
 ## Supported Versions
 
