@@ -4,6 +4,10 @@ Designed to mine GRC (Gridcoin) to support BOINC projects with Xeon Phi 5110p mo
 Will probably work with the Knights Landing chipset but that has not been tested by the open source community.
 Also used to mine XMR (Monero) with CPUs and ETC (Ethereum Classic) with GPUs. Replace mining pool info with your own.
 
+BOINC home page at Berkeley: https://boinc.berkeley.edu
+
+Gridcoin (GRC) home page: https://gridcoin.us/
+
 SuperMicro SuperServer SYS-2028GR-TR specs:
 https://www.supermicro.com/en/products/system/2u/2028/sys-2028gr-tr.php
 
