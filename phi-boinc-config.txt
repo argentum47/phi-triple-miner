@@ -1,0 +1,671 @@
+===========================================================================
+BOINC + GRIDCOIN CONFIGURATION FOR 2x INTEL XEON PHI 5110p (x100 KNC)
+Supermicro SYS-2028GR-TR | Ubuntu 20.04 LTS | Kernel 5.4 (pinned) | MPSS 3.8.6
+===========================================================================
+
+CONFIRMED COMPATIBILITY
+------------------------
+Host OS      : Ubuntu 20.04 LTS (Focal Fossa)
+Kernel       : 5.4.0-xxx-generic (pinned — do NOT allow kernel upgrades)
+MPSS version : 3.8.6
+Patch source : github.com/charlieporth1/mpss-modules
+               — explicitly patched for kernel 5.4.0, tested on Ubuntu 20.04
+Cards        : 2x Intel Xeon Phi 5110p (x100 Knights Corner, PCIe)
+               60 cores x 4 HT = 240 threads per card, 480 total
+
+ALL COMMANDS IN THIS GUIDE USE apt / dpkg / Ubuntu EQUIVALENTS ONLY.
+No yum, rpm, or CentOS-specific syntax appears anywhere in this guide.
+
+===========================================================================
+PART 1 — KERNEL PINNING (do this first, before installing anything)
+===========================================================================
+
+The MPSS kernel module must match the running kernel exactly.
+Auto-upgrades to a newer kernel will silently break MPSS.
+Pin the kernel before proceeding.
+
+1.1 IDENTIFY AND INSTALL THE TARGET KERNEL
+-------------------------------------------
+# Install the specific 5.4 kernel and headers if not already present
+sudo apt-get update
+sudo apt-get install -y \
+    linux-image-5.4.0-182-generic \
+    linux-headers-5.4.0-182-generic
+
+# Confirm it is installed
+dpkg -l | grep "5.4.0-182"
+# Expected: two lines — linux-image and linux-headers
+
+1.2 PIN THE KERNEL TO PREVENT AUTO-UPGRADE
+--------------------------------------------
+# Hold the generic meta-packages so apt never pulls a newer kernel
+sudo apt-mark hold \
+    linux-image-generic \
+    linux-headers-generic \
+    linux-image-5.4.0-182-generic \
+    linux-headers-5.4.0-182-generic
+
+# Verify hold is active
+apt-mark showhold
+# Expected: all four packages listed as held
+
+1.3 SET 5.4 KERNEL AS DEFAULT GRUB BOOT ENTRY
+-----------------------------------------------
+# Find the exact GRUB menu entry string
+grep -E "menuentry |submenu " /boot/grub/grub.cfg | head -20
+
+# Edit GRUB default — set to the 5.4 submenu entry
+sudo nano /etc/default/grub
+
+# Change GRUB_DEFAULT to the exact string shown in grub.cfg, for example:
+GRUB_DEFAULT="Advanced options for Ubuntu>Ubuntu, with Linux 5.4.0-182-generic"
+
+# Apply the change
+sudo update-grub
+
+# Reboot and verify
+sudo reboot
+# After reboot:
+uname -r
+# Expected: 5.4.0-182-generic
+
+1.4 DISABLE UNATTENDED KERNEL UPGRADES
+----------------------------------------
+# Prevent unattended-upgrades from overriding the pinned kernel
+sudo nano /etc/apt/apt.conf.d/50unattended-upgrades
+
+# Add or ensure this line is present under Unattended-Upgrade::Package-Blacklist:
+"linux-.*";
+
+# Save and exit
+
+
+===========================================================================
+PART 2 — HOST PREREQUISITE PACKAGES (Ubuntu / apt)
+===========================================================================
+
+sudo apt-get update
+sudo apt-get install -y \
+    build-essential \
+    linux-headers-5.4.0-182-generic \
+    dkms \
+    alien \
+    git \
+    curl \
+    wget \
+    autoconf \
+    automake \
+    libtool \
+    libssl-dev \
+    pkg-config \
+    nfs-kernel-server \
+    nfs-common \
+    openssh-client \
+    python3 \
+    python3-pip
+
+# alien: converts Intel's RPM packages to Ubuntu DEB format
+# nfs-kernel-server: Ubuntu name for the NFS server daemon (not nfs-server)
+# nfs-common: provides showmount and NFS client tools
+
+===========================================================================
+PART 3 — BUILD AND INSTALL MPSS KERNEL MODULE
+===========================================================================
+
+3.1 CLONE THE CHARLIEPORTH1 COMMUNITY PATCH
+---------------------------------------------
+# This fork is explicitly patched for Ubuntu 20.04 + kernel 5.4.0
+git clone https://github.com/charlieporth1/mpss-modules.git
+cd mpss-modules
+
+3.2 BUILD THE mic.ko KERNEL MODULE
+------------------------------------
+# Specify k1om architecture — required for x100 Knights Corner cards
+make MIC_CARD_ARCH=k1om
+
+# If make fails with a missing kernel header error, verify headers are present:
+ls /usr/src/linux-headers-$(uname -r)
+# If missing: sudo apt-get install linux-headers-$(uname -r)
+
+3.3 INSTALL THE MODULE
+-----------------------
+sudo make install
+sudo depmod -a
+
+# Optionally install development headers (needed for custom offload code)
+sudo make dev_install
+
+# Load the module immediately without rebooting
+sudo modprobe mic
+
+# Verify the module is loaded
+lsmod | grep mic
+# Expected: mic module listed with non-zero size
+
+3.4 PERSIST MODULE LOAD ACROSS REBOOTS
+----------------------------------------
+echo "mic" | sudo tee -a /etc/modules-load.d/mic.conf
+
+===========================================================================
+PART 4 — INSTALL MPSS 3.8.6 USERSPACE TOOLS VIA ALIEN
+===========================================================================
+
+Intel ships MPSS tools as RPM packages. alien converts them to DEB
+so dpkg can install them on Ubuntu. The --scripts flag preserves
+pre/post install scriptlets critical for MPSS to function correctly.
+
+4.1 OBTAIN MPSS 3.8.6 SOURCE ARCHIVE
+--------------------------------------
+# The official Intel download page is defunct.
+# Use the Internet Archive mirror — this is the complete official tarball.
+wget "https://archive.org/download/intel-mpss-3.8.6/mpss-3.8.6-linux.tar" \
+    -O mpss-3.8.6-linux.tar
+
+tar xf mpss-3.8.6-linux.tar
+cd mpss-3.8.6
+
+# List the available RPMs
+ls *.rpm
+
+4.2 CONVERT RPMs TO DEBs AND INSTALL
+--------------------------------------
+# Convert each required package — the --scripts flag is critical
+sudo alien --scripts --to-deb mpss-daemon-3.8.6-*.x86_64.rpm
+sudo alien --scripts --to-deb mpss-utils-3.8.6-*.x86_64.rpm
+sudo alien --scripts --to-deb mpss-sdk-3.8.6-*.x86_64.rpm
+sudo alien --scripts --to-deb mpss-boot-files-3.8.6-*.x86_64.rpm
+sudo alien --scripts --to-deb mpss-flash-3.8.6-*.x86_64.rpm
+
+# Install in dependency order
+sudo dpkg -i mpss-boot-files_*.deb
+sudo dpkg -i mpss-flash_*.deb
+sudo dpkg -i mpss-daemon_*.deb
+sudo dpkg -i mpss-utils_*.deb
+sudo dpkg -i mpss-sdk_*.deb
+
+# Fix any dependency issues from alien conversion
+sudo apt-get install -f
+
+# Verify tools are installed
+which micctrl micinfo micsmc
+# Expected: /usr/bin/micctrl /usr/bin/micinfo /usr/bin/micsmc
+
+4.3 CREATE MPSS SYSTEMD SERVICE FOR UBUNTU
+--------------------------------------------
+# Intel's MPSS uses a SysV init script — wrap it in a systemd unit
+# Ubuntu does not auto-create this; it must be done manually
+
+sudo tee /etc/systemd/system/mpss.service << 'EOF'
+[Unit]
+Description=Intel Manycore Platform Software Stack (MPSS)
+After=network.target nfs-kernel-server.service
+
+[Service]
+Type=forking
+ExecStart=/etc/init.d/mpss start
+ExecStop=/etc/init.d/mpss stop
+RemainAfterExit=yes
+TimeoutStartSec=120
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable mpss
+sudo systemctl start mpss
+
+# Verify service is running
+sudo systemctl status mpss
+# Expected: active (running)
+
+4.4 VERIFY BOTH PHI CARDS ARE DETECTED
+----------------------------------------
+sudo micinfo | grep "Device No"
+# Expected:
+#   Device No: 0  (mic0)
+#   Device No: 1  (mic1)
+
+sudo micctrl --status
+# Expected:
+#   mic0: online
+#   mic1: online
+
+# If cards show as 'ready' rather than 'online', boot them manually:
+sudo micctrl --boot mic0 mic1
+sudo micctrl --wait
+
+===========================================================================
+PART 5 — NFS SHARED FILESYSTEM (Ubuntu-specific service names)
+===========================================================================
+
+5.1 CREATE DIRECTORY STRUCTURE
+--------------------------------
+sudo mkdir -p /opt/phi-boinc/{data/mic0,data/mic1,mic/bin}
+sudo chown -R root:root /opt/phi-boinc
+sudo chmod -R 755 /opt/phi-boinc
+
+5.2 CONFIGURE NFS EXPORT
+--------------------------
+# Add export — Ubuntu NFS uses no_subtree_check by default
+echo "/opt/phi-boinc  172.31.1.0/24(rw,no_root_squash,sync,no_subtree_check)" \
+    | sudo tee -a /etc/exports
+
+# Apply the export
+sudo exportfs -ra
+
+# Start and enable the NFS server — Ubuntu service name is nfs-kernel-server
+sudo systemctl enable nfs-kernel-server
+sudo systemctl start nfs-kernel-server
+
+# Verify the export is active
+showmount -e localhost
+# Expected: /opt/phi-boinc  172.31.1.0/24
+
+5.3 MOUNT NFS ON EACH PHI CARD VIA MPSS
+-----------------------------------------
+sudo micctrl --initdefaults
+sudo micctrl --addnfs=/opt/phi-boinc,localdir=/opt/phi-boinc mic0
+sudo micctrl --addnfs=/opt/phi-boinc,localdir=/opt/phi-boinc mic1
+sudo micctrl --reboot mic0 mic1
+sudo micctrl --wait
+
+# Verify NFS is mounted on each card
+ssh root@mic0 "df -h /opt/phi-boinc"
+ssh root@mic1 "df -h /opt/phi-boinc"
+# Expected: /opt/phi-boinc shown with available space
+
+===========================================================================
+PART 6 — SSH KEY SETUP FOR CARD ACCESS (Ubuntu-specific)
+===========================================================================
+
+# Ubuntu does not auto-configure SSH keys for Phi cards — do this manually
+# Generate a dedicated key for root-to-card access
+sudo ssh-keygen -t ed25519 -f /root/.ssh/id_mic -N "" -C "phi-card-access"
+
+# MPSS uses an overlay filesystem in /var/mpss to populate each card's rootfs
+# Copy the public key into the overlay so it persists across card reboots
+sudo mkdir -p /var/mpss/mic0/root/.ssh
+sudo mkdir -p /var/mpss/mic1/root/.ssh
+
+sudo cp /root/.ssh/id_mic.pub /var/mpss/mic0/root/.ssh/authorized_keys
+sudo cp /root/.ssh/id_mic.pub /var/mpss/mic1/root/.ssh/authorized_keys
+
+# Set correct permissions — SSH is strict about these
+sudo chmod 700 /var/mpss/mic0/root/.ssh
+sudo chmod 700 /var/mpss/mic1/root/.ssh
+sudo chmod 600 /var/mpss/mic0/root/.ssh/authorized_keys
+sudo chmod 600 /var/mpss/mic1/root/.ssh/authorized_keys
+
+# Reboot cards to apply the overlay changes
+sudo micctrl --reboot mic0 mic1
+sudo micctrl --wait
+
+# Test SSH access using the dedicated key
+ssh -i /root/.ssh/id_mic \
+    -o StrictHostKeyChecking=no \
+    root@mic0 "uname -a"
+# Expected: Linux mic0 2.6.38.8+ ... k1om GNU/Linux
+
+ssh -i /root/.ssh/id_mic \
+    -o StrictHostKeyChecking=no \
+    root@mic1 "uname -a"
+# Expected: Linux mic1 2.6.38.8+ ... k1om GNU/Linux
+
+# Add SSH config entry to simplify future connections
+sudo tee -a /root/.ssh/config << 'EOF'
+Host mic0
+    HostName 172.31.1.1
+    User root
+    IdentityFile /root/.ssh/id_mic
+    StrictHostKeyChecking no
+
+Host mic1
+    HostName 172.31.1.2
+    User root
+    IdentityFile /root/.ssh/id_mic
+    StrictHostKeyChecking no
+EOF
+
+# Test using simplified hostname
+ssh mic0 "hostname && nproc"
+# Expected: mic0 / 240
+
+===========================================================================
+PART 7 — CROSS-COMPILE BOINC CLIENT FOR k1om ARCHITECTURE
+===========================================================================
+
+The Phi card's k1om CPU cannot run standard x86_64 binaries.
+BOINC must be cross-compiled using the k1om toolchain from the MPSS SDK.
+
+7.1 LOCATE THE k1om CROSS-COMPILER (Ubuntu path)
+--------------------------------------------------
+# The toolchain is installed by mpss-sdk — Ubuntu path differs from CentOS
+# Check where alien placed the SDK tools
+find /usr -name "k1om-mpss-linux-gcc" 2>/dev/null
+
+# Typical Ubuntu path after alien conversion:
+export K1OM_TC="/usr/linux-k1om-4.7/bin"
+export PATH="${K1OM_TC}:${PATH}"
+export CC=k1om-mpss-linux-gcc
+export CXX=k1om-mpss-linux-g++
+export AR=k1om-mpss-linux-ar
+export STRIP=k1om-mpss-linux-strip
+
+# Confirm the compiler is present and correct
+k1om-mpss-linux-gcc --version
+# Expected: gcc version 4.7.x (MPSS SDK)
+
+7.2 BUILD BOINC CLIENT (static, headless, k1om target)
+--------------------------------------------------------
+git clone https://github.com/BOINC/boinc.git
+cd boinc
+
+# 7.24 is the last release with clean CPU-only static build support
+git checkout client_release/7/7.24
+
+# Bootstrap the build system
+./_autosetup
+
+# Configure for static k1om build — no SSL, no GUI, no shared libs
+./configure \
+    --host=k1om-mpss-linux \
+    --build=x86_64-linux \
+    --prefix=/opt/phi-boinc/mic \
+    --disable-server \
+    --disable-manager \
+    --disable-boinczip \
+    --disable-shared \
+    --enable-static \
+    --without-ssl \
+    --without-x \
+    LDFLAGS="-static"
+
+# Build using all available host CPU cores
+make -j$(nproc)
+make install
+
+# Verify the binary targets k1om — not x86_64
+file /opt/phi-boinc/mic/bin/boinc_client
+# Expected: ELF 64-bit LSB executable, k1om, ...
+
+# Strip debug symbols to reduce NFS transfer overhead
+$STRIP /opt/phi-boinc/mic/bin/boinc_client
+$STRIP /opt/phi-boinc/mic/bin/boinccmd
+
+# Verify binary is executable on the card
+ssh mic0 "/opt/phi-boinc/mic/bin/boinc_client --version"
+# Expected: BOINC client version 7.24.x
+
+===========================================================================
+PART 8 — BOINC DATA DIRECTORY CONFIGURATION
+===========================================================================
+
+8.1 cc_config.xml — forces 240 threads, suppresses GPU detection
+-----------------------------------------------------------------
+for MIC in mic0 mic1; do
+cat | sudo tee /opt/phi-boinc/data/${MIC}/cc_config.xml << 'EOF'
+<cc_config>
+  <options>
+    <!-- 60 cores x 4 hardware threads = 240 threads per card -->
+    <ncpus>240</ncpus>
+    <max_ncpus_pct>100</max_ncpus_pct>
+    <!-- Extended timeout for k1om single-core clock speed (1.053 GHz) -->
+    <http_transfer_timeout>600</http_transfer_timeout>
+    <http_transfer_timeout_bps>80</http_transfer_timeout_bps>
+    <!-- 30 days needed for accurate Gridcoin RAC calculation -->
+    <save_stats_days>30</save_stats_days>
+    <!-- Card has no CUDA, OpenCL or CAL — suppress GPU detection -->
+    <no_gpus>1</no_gpus>
+  </options>
+</cc_config>
+EOF
+done
+
+8.2 global_prefs_override.xml — run at 100% continuously
+----------------------------------------------------------
+for MIC in mic0 mic1; do
+cat | sudo tee /opt/phi-boinc/data/${MIC}/global_prefs_override.xml << 'EOF'
+<global_preferences>
+  <!-- Run at all times — dedicated compute node, no interactive users -->
+  <run_on_batteries>1</run_on_batteries>
+  <run_if_user_active>1</run_if_user_active>
+  <run_gpu_if_user_active>0</run_gpu_if_user_active>
+  <!-- Use every available thread -->
+  <max_ncpus_pct>100</max_ncpus_pct>
+  <cpu_usage_limit>100</cpu_usage_limit>
+  <!-- Cache 2 days of work — protects against pool/network outages -->
+  <work_buf_min_days>0.5</work_buf_min_days>
+  <work_buf_additional_days>1.5</work_buf_additional_days>
+  <!-- NFS handles storage — set generous disk limit -->
+  <disk_max_used_gb>50</disk_max_used_gb>
+  <disk_min_free_gb>1</disk_min_free_gb>
+</global_preferences>
+EOF
+done
+
+# Verify files are readable from both cards
+ssh mic0 "cat /opt/phi-boinc/data/mic0/cc_config.xml"
+ssh mic1 "cat /opt/phi-boinc/data/mic1/cc_config.xml"
+
+===========================================================================
+PART 9 — PROJECT ATTACHMENT AND GRIDCOIN POOL SETUP
+===========================================================================
+
+9.1 REGISTER ACCOUNTS (do before running any commands below)
+-------------------------------------------------------------
+  grcpool.com         : https://grcpool.com/register
+                        Provides YOUR_POOL_KEY after registration.
+                        No GRC balance needed. Pays daily in GRC.
+
+  SRBase              : http://srbase.my-firewall.org/sr5/create_account_form.php
+  Amicable Numbers    : https://boinc.amicable.rocks/create_account_form.php
+  NFS@home            : https://escatter11.fullerton.edu/nfs/create_account_form.php
+
+  Use the SAME email address for all projects — Gridcoin tracks credit
+  by Cross-Project ID (CPID) which is derived from your email.
+
+9.2 START BOINC DAEMONS ON BOTH CARDS
+---------------------------------------
+for MIC in mic0 mic1; do
+    ssh ${MIC} \
+        "/opt/phi-boinc/mic/bin/boinc_client \
+        --daemon \
+        --data_dir /opt/phi-boinc/data/${MIC}" \
+        && echo "${MIC}: BOINC daemon started" \
+        || echo "${MIC}: BOINC daemon failed to start"
+done
+
+sleep 5
+
+9.3 ATTACH TO grcpool AND ALL THREE PROJECTS
+---------------------------------------------
+# Replace all YOUR_xxx_KEY placeholders before running
+
+for MIC in mic0 mic1; do
+    DATA="/opt/phi-boinc/data/${MIC}"
+
+    # Pool attachment — required first for Gridcoin earnings
+    ssh ${MIC} "/opt/phi-boinc/mic/bin/boinccmd \
+        --data_dir ${DATA} \
+        --project_attach https://grcpool.com YOUR_POOL_KEY" \
+        && echo "${MIC}: grcpool attached" \
+        || echo "${MIC}: grcpool attachment failed"
+
+    sleep 3
+
+    # SRBase — best credit/hour for high thread-count CPU hardware
+    ssh ${MIC} "/opt/phi-boinc/mic/bin/boinccmd \
+        --data_dir ${DATA} \
+        --project_attach http://srbase.my-firewall.org/sr5/ YOUR_SRBASE_KEY" \
+        && echo "${MIC}: SRBase attached"
+
+    # Amicable Numbers — pure integer, scales linearly with thread count
+    ssh ${MIC} "/opt/phi-boinc/mic/bin/boinccmd \
+        --data_dir ${DATA} \
+        --project_attach https://boinc.amicable.rocks/ YOUR_AMICABLE_KEY" \
+        && echo "${MIC}: Amicable Numbers attached"
+
+    # NFS@home — integer factoring, good utilization on vector hardware
+    ssh ${MIC} "/opt/phi-boinc/mic/bin/boinccmd \
+        --data_dir ${DATA} \
+        --project_attach https://escatter11.fullerton.edu/nfs/ YOUR_NFS_KEY" \
+        && echo "${MIC}: NFS@home attached"
+done
+
+9.4 VERIFY TASKS ARE DOWNLOADING AND RUNNING
+---------------------------------------------
+# Allow 2-5 minutes for initial work unit download after project attach
+
+for MIC in mic0 mic1; do
+    echo "=== ${MIC} active tasks ==="
+    ssh ${MIC} "/opt/phi-boinc/mic/bin/boinccmd \
+        --data_dir /opt/phi-boinc/data/${MIC} \
+        --get_tasks" | grep -E "name|state|fraction"
+done
+# Expected: tasks listed with state EXECUTING and fraction_done > 0.0
+
+
+===========================================================================
+PART 10 — HEALTH MONITORING (all Ubuntu commands)
+===========================================================================
+
+# MPSS service status
+sudo systemctl status mpss
+
+# NFS server status — Ubuntu service name
+sudo systemctl status nfs-kernel-server
+
+# Both Phi card status
+sudo micctrl --status mic0 mic1
+
+# Card temperatures (thermal)
+sudo micsmc -t
+
+# Card core utilization
+sudo micsmc -c
+
+# Full card info
+sudo micinfo
+
+# BOINC project credit and RAC per card
+for MIC in mic0 mic1; do
+    echo "=== ${MIC} project status ==="
+    ssh ${MIC} "/opt/phi-boinc/mic/bin/boinccmd \
+        --data_dir /opt/phi-boinc/data/${MIC} \
+        --get_project_status" | grep -E "name|user_total_credit|user_expavg"
+done
+
+# Manually trigger work fetch if queue is empty
+for MIC in mic0 mic1; do
+    ssh ${MIC} "/opt/phi-boinc/mic/bin/boinccmd \
+        --data_dir /opt/phi-boinc/data/${MIC} \
+        --project http://srbase.my-firewall.org/sr5/ update"
+done
+
+# Check NFS is still mounted on cards after any card reboot
+for MIC in mic0 mic1; do
+    ssh ${MIC} "df -h /opt/phi-boinc" \
+        && echo "${MIC}: NFS mounted" \
+        || echo "${MIC}: NFS NOT mounted — check nfs-kernel-server"
+done
+
+===========================================================================
+PART 11 — ONGOING OPTIMIZATION WITH FindTheMag (Ubuntu)
+===========================================================================
+
+# Install Python dependencies (Ubuntu / pip3)
+sudo apt-get install -y python3-pip
+pip3 install requests
+
+# Clone and run FindTheMag
+git clone https://github.com/makeasnek/FindTheMag.git
+cd FindTheMag
+python3 main.py --boinc_dir /opt/phi-boinc/data/mic0
+
+# Run monthly — project GRC yield shifts as crunchers join and leave.
+# If SRBase becomes saturated, reallocate threads to Amicable Numbers.
+# The optimal project split changes and must be checked periodically.
+
+===========================================================================
+PART 12 — TROUBLESHOOTING REFERENCE (Ubuntu-specific)
+===========================================================================
+
+PROBLEM: mic module fails to load after kernel update
+FIX    : sudo apt-get install linux-headers-$(uname -r)
+         cd ~/mpss-modules && make clean && make MIC_CARD_ARCH=k1om
+         sudo make install && sudo depmod -a && sudo modprobe mic
+NOTE   : This should not happen if kernel is pinned per Part 1.
+
+PROBLEM: micctrl --status shows 'ready' not 'online'
+FIX    : sudo micctrl --boot mic0 mic1 && sudo micctrl --wait
+
+PROBLEM: SSH to mic0/mic1 times out or refuses connection
+FIX    : sudo micctrl --reboot mic0 mic1 && sudo micctrl --wait
+         ssh -i /root/.ssh/id_mic root@mic0 "hostname"
+
+PROBLEM: NFS not mounted on card after reboot
+FIX    : sudo exportfs -ra
+         sudo systemctl restart nfs-kernel-server
+         sudo micctrl --reboot mic0 mic1 && sudo micctrl --wait
+
+PROBLEM: BOINC shows no tasks after 10+ minutes
+FIX    : Verify project attachment:
+         ssh mic0 "boinccmd --data_dir /opt/phi-boinc/data/mic0 \
+             --get_project_status"
+         Trigger manual update:
+         ssh mic0 "boinccmd --data_dir /opt/phi-boinc/data/mic0 \
+             --project http://srbase.my-firewall.org/sr5/ update"
+
+PROBLEM: dpkg errors after alien conversion of MPSS RPMs
+FIX    : sudo apt-get install -f
+         This resolves missing dependencies that alien cannot convert.
+
+PROBLEM: k1om-mpss-linux-gcc not found after SDK install
+FIX    : find /usr -name "k1om-mpss-linux-gcc" 2>/dev/null
+         Update K1OM_TC export to match the actual path found.
+
+===========================================================================
+PACKAGE NAME REFERENCE — CentOS to Ubuntu translation
+===========================================================================
+
+  CentOS / yum                      Ubuntu / apt equivalent
+  ─────────────────────────────     ────────────────────────────────
+  yum install <pkg>                 sudo apt-get install <pkg>
+  yum update                        sudo apt-get update && apt-get upgrade
+  rpm -ivh <pkg>.rpm                sudo alien --scripts --to-deb <pkg>.rpm
+                                    sudo dpkg -i <converted>.deb
+  rpm -qa | grep <pkg>              dpkg -l | grep <pkg>
+  kernel-devel                      linux-headers-$(uname -r)
+  elfutils                          elfutils  (same name)
+  rpm-build                         Not needed — alien replaces this
+  nfs-server                        nfs-kernel-server
+  nfs-utils                         nfs-common
+  chkconfig nfs on                  sudo systemctl enable nfs-kernel-server
+  service nfs start                 sudo systemctl start nfs-kernel-server
+  /etc/exports                      /etc/exports  (same format)
+
+===========================================================================
+EARNINGS SUMMARY
+===========================================================================
+
+Hardware          : 2x Phi 5110p @ 240 threads each = 480 total
+Projects          : SRBase, Amicable Numbers, NFS@home via grcpool
+Estimated RAC     : ~40-80 magnitude
+Daily GRC         : ~10-20 GRC
+Monthly GRC       : ~300-600 GRC
+Monthly USD       : $1.68-$3.36 at current GRC ($0.0056)
+                    $3.36-$6.72 at 2x bull price ($0.0112)
+
+Power (BOINC load): ~175W per card sustained = ~350W both cards
+  (Lower than peak mining draw of 225W per card)
+
+GRC earnings are modest but the Phi cards have no other viable
+profitable workload in 2026. BOINC contributes genuine scientific
+value while earning a tradeable token on Binance and Kraken.
+
+===========================================================================
+END OF CONFIGURATION GUIDE
+Ubuntu 20.04 LTS + kernel 5.4 pinned + MPSS 3.8.6 + BOINC + Gridcoin
+===========================================================================
