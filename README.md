@@ -1,8 +1,9 @@
 # phi-triple-miner
-An open source miner for Intel Xeon Phi Coprocessor based on lukMiner and the previous work of others.
-Designed to mine GRC (Gridcoin) to support BOINC projects with Xeon Phi 5110p models only, based on the Knights Corner chipset. 
-Will probably work with the Knights Landing chipset but that has not been tested by the open source community.
-Also used to mine XMR (Monero) with CPUs and ETC (Ethereum Classic) with GPUs. Replace mining pool info with your own.
+An open source miner for the Intel Xeon Phi Coprocessor based on lukMiner and the previous work of others.
+Designed to mine GRC (Gridcoin) to support BOINC projects with Xeon Phi 5110p coprocessors, based on the Knights Corner chipset. 
+Will probably work with the Knights Landing chipset but this has not been tested by the open source community.
+Also used to mine XMR (Monero) with CPUs and ETC (Ethereum Classic) with GPUs. Replace mining pool info with your own. 
+With this setup, you can mine three stable coins with a single 2u server and 1,000 watts.
 
 BOINC home page at Berkeley: https://boinc.berkeley.edu
 Gridcoin (GRC) the cryptocurrency of science: https://gridcoin.us
